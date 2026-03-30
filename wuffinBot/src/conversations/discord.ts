@@ -73,10 +73,11 @@ export const DiscordConversation = new Conversation({
   async handler({ message, conversation, execute }) {
     const discordChannelId = conversation.tags["discord:id"];
 
-    // Auto-save general channel conversation ID for proactive messages
+    // Auto-save general channel conversation ID + user ID for proactive messages
     if (discordChannelId === GENERAL_CHANNEL_ID && !bot.state.discordInsightsConversationId) {
       bot.state.discordInsightsConversationId = conversation.id;
-      console.log(`[discord] saved general channel conversation: ${conversation.id}`);
+      bot.state.discordInsightsUserId = context.get("user", { optional: true })?.id;
+      console.log(`[discord] saved general channel: conv=${conversation.id} user=${bot.state.discordInsightsUserId}`);
     }
 
     if (message?.type !== "text") return;

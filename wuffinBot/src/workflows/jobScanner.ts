@@ -15,14 +15,15 @@ export const DailyJobDigestWorkflow = new Workflow({
   async handler({ state, step, client }) {
     const today = new Date().toISOString().split("T")[0]!;
     const conversationId = bot.state.discordInsightsConversationId;
+    const userId = bot.state.discordInsightsUserId;
 
-    if (!conversationId) {
+    if (!conversationId || !userId) {
       console.log("[dailyJobDigest] No Discord channel — send any message in #general first.");
       return;
     }
 
     const sendMessage = async (text: string) => {
-      await client.createMessage({ conversationId, type: "text", payload: { text } });
+      await client.createMessage({ conversationId, userId, type: "text", payload: { text }, tags: {} });
     };
 
     const { newJobs, sitesScanned } = await step("scan", async () => {

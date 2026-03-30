@@ -156,7 +156,12 @@ export async function seedSite(company: string, url: string): Promise<number> {
   if (!markdown) return 0;
 
   const links = extractJobLinks(markdown);
-  console.log(`[seedSite] ${company} — ${links.length} link(s) found`);
+  console.log(`[seedSite] ${company} — ${links.length} link(s) extracted`);
+  if (links.length > 0) {
+    console.log(`[seedSite] sample links:\n${links.slice(0, 5).map((l) => `  "${l.title}" → ${l.url}`).join("\n")}`);
+  } else {
+    console.log(`[seedSite] markdown preview:\n${markdown.slice(0, 1000)}`);
+  }
 
   let seeded = 0;
 
@@ -165,8 +170,9 @@ export async function seedSite(company: string, url: string): Promise<number> {
     const { rows: existing } = await JobsTable.findRows({ filter: { jobKey }, limit: 1 });
     if (existing.length > 0) continue; // already known
 
-    console.log(`[seedSite] parsing: ${link.url}`);
+    console.log(`[seedSite] parsing: "${link.title}" → ${link.url}`);
     const details = await parseJobPage(link.url);
+    console.log(`[seedSite] result: isJob=${details.isJob}, title="${details.title}"`);
 
     if (!details.isJob) {
       await JobsTable.createRows({
