@@ -10,7 +10,7 @@ export const DailyNewJobsTable = new Table({
     title: z.string(),
     url: z.string(),
     experience: z.string().optional(),
-    description: z.string().optional(),
+    summary: z.string().optional(),
     foundAt: z.string().describe("ISO date this job was first found"),
   },
 });

@@ -1,8 +1,9 @@
-import { Conversation, Autonomous, bot, context, z } from "@botpress/runtime";
+import { Conversation, Autonomous, bot, context, z, actions } from "@botpress/runtime";
 import { WatchedSitesTable } from "../tables/WatchedSitesTable";
-import { JobsTable } from "../tables/JobsTable";
+import { LinksTable } from "../tables/LinksTable";
 import { KeywordsTable } from "../tables/KeywordsTable";
-import { scanSites, seedSite } from "../utils/scanSites";
+import { scanSites } from "../utils/scanSites";
+import { SeedSiteWorkflow } from "../workflows/seedSite";
 
 const ADD_LINK_CHANNEL_ID = "1488275758391628077";
 const GENERAL_CHANNEL_ID = "1488249561234542754";
@@ -34,18 +35,18 @@ const searchJobs = new Autonomous.Tool({
   input: z.object({
     company: z.string().optional().describe("Filter by company name (partial match)"),
     titleKeyword: z.string().optional().describe("Filter by keyword in job title"),
-    location: z.string().optional().describe("Filter by location (e.g. Toronto, Remote)"),
+    location: z.string().optional().describe("Filter by location keyword in summary (e.g. Toronto, Remote)"),
     addedToday: z.boolean().optional().describe("If true, only return jobs first seen today"),
   }),
   handler: async ({ company, titleKeyword, location, addedToday }) => {
-    const { rows } = await JobsTable.findRows({ limit: 500 });
+    const { rows } = await LinksTable.findRows({ limit: 500 });
     const today = new Date().toISOString().split("T")[0]!;
 
     const results = rows.filter((job) => {
-      if (job.title.startsWith("SKIP:")) return false;
+      if (!job.title) return false; // invalid/non-job link
       if (company && !job.company.toLowerCase().includes(company.toLowerCase())) return false;
       if (titleKeyword && !job.title.toLowerCase().includes(titleKeyword.toLowerCase())) return false;
-      if (location && !job.location?.toLowerCase().includes(location.toLowerCase())) return false;
+      if (location && !job.summary?.toLowerCase().includes(location.toLowerCase())) return false;
       if (addedToday && job.firstSeenAt !== today) return false;
       return true;
     });
@@ -56,11 +57,10 @@ const searchJobs = new Autonomous.Tool({
       found: true,
       jobs: results.map((j) => ({
         company: j.company,
-        title: j.title,
-        location: j.location ?? "N/A",
+        title: j.title!,
         experience: j.experience ?? "N/A",
-        description: j.description ?? "N/A",
-        url: j.url ?? "N/A",
+        summary: j.summary ?? "N/A",
+        url: j.url,
         firstSeenAt: j.firstSeenAt,
       })),
     };
@@ -72,22 +72,30 @@ export const DiscordConversation = new Conversation({
 
   async handler({ message, conversation, execute }) {
     const discordChannelId = conversation.tags["discord:id"];
+    const discordParentId = conversation.tags["discord:parentId"] ?? conversation.tags["discord:parent_id"];
+    console.log(`[discord] conversation tags:`, JSON.stringify(conversation.tags));
 
-    // Auto-save general channel conversation ID + user ID for proactive messages
-    if (discordChannelId === GENERAL_CHANNEL_ID && !bot.state.discordInsightsConversationId) {
+    const isAddLinkChannel = discordChannelId === ADD_LINK_CHANNEL_ID || discordParentId === ADD_LINK_CHANNEL_ID;
+    const isGeneralChannel = discordChannelId === GENERAL_CHANNEL_ID || discordParentId === GENERAL_CHANNEL_ID;
+
+    // Auto-save general channel Discord channel ID for daily digest
+    if (isGeneralChannel && !bot.state.discordInsightsChannelId) {
       bot.state.discordInsightsConversationId = conversation.id;
       bot.state.discordInsightsUserId = context.get("user", { optional: true })?.id;
-      console.log(`[discord] saved general channel: conv=${conversation.id} user=${bot.state.discordInsightsUserId}`);
+      bot.state.discordInsightsChannelId = GENERAL_CHANNEL_ID;
+      console.log(`[discord] saved general channel: channelId=${GENERAL_CHANNEL_ID}`);
     }
 
     if (message?.type !== "text") return;
     const text = message.payload.text.trim();
+    console.log(`[discord] message tags:`, JSON.stringify(message.tags));
 
     // --- Add Link channel ---
-    if (discordChannelId === ADD_LINK_CHANNEL_ID) {
+    if (isAddLinkChannel) {
+      const send = async (t: string) => conversation.send({ type: "text", payload: { text: t } });
 
       if (text === "/help") {
-        await conversation.send({ type: "text", payload: { text: ADD_LINK_HELP } });
+        await send(ADD_LINK_HELP);
         return;
       }
 
@@ -97,7 +105,7 @@ export const DiscordConversation = new Conversation({
         const company = parts.join(" ");
 
         if (!url.startsWith("http") || !company) {
-          await conversation.send({ type: "text", payload: { text: "⚠️ Format: `/add CompanyName https://careers.company.com`" } });
+          await send("⚠️ Format: `/add CompanyName https://careers.company.com`");
           return;
         }
 
@@ -106,21 +114,27 @@ export const DiscordConversation = new Conversation({
           keyColumn: "url",
         });
 
-        await conversation.send({ type: "text", payload: { text: `⏳ Added **${company}** — seeding current jobs, please wait...` } });
+        const messageId = message.tags["discord:id"] ?? "";
+        const channelId = discordChannelId ?? ADD_LINK_CHANNEL_ID;
 
-        const seeded = await seedSite(company, url);
+        await SeedSiteWorkflow.start({
+          company,
+          url,
+          messageId,
+          channelId,
+        });
 
-        await conversation.send({ type: "text", payload: { text: `✅ **${company}** is live — seeded **${seeded}** job(s). You'll be notified of new ones daily.` } });
+        await send(`⏳ **${company}** added — seeding links in the background. Results will appear in a thread shortly.`);
         return;
       }
 
       if (text === "/list") {
         const { rows } = await WatchedSitesTable.findRows({ limit: 100 });
         if (rows.length === 0) {
-          await conversation.send({ type: "text", payload: { text: "📋 No sites watched yet. Use `/add CompanyName URL` to add one." } });
+          await send("📋 No sites watched yet. Use `/add CompanyName URL` to add one.");
         } else {
           const list = rows.map((r) => `\`${r.id}\` **${r.company}** — ${r.url}`).join("\n");
-          await conversation.send({ type: "text", payload: { text: `📋 Watching ${rows.length} site(s):\n\n${list}` } });
+          await send(`📋 Watching ${rows.length} site(s):\n\n${list}`);
         }
         return;
       }
@@ -130,32 +144,32 @@ export const DiscordConversation = new Conversation({
         const { rows } = await WatchedSitesTable.findRows({ limit: 100 });
         const row = rows.find((r) => r.id === id);
         if (!row) {
-          await conversation.send({ type: "text", payload: { text: `⚠️ No site found with ID \`${id}\`. Use \`/list\` to see IDs.` } });
+          await send(`⚠️ No site found with ID \`${id}\`. Use \`/list\` to see IDs.`);
           return;
         }
         await WatchedSitesTable.deleteRows({ ids: [row.id] });
-        await conversation.send({ type: "text", payload: { text: `🗑️ Removed **${row.company}** from watchlist.` } });
+        await send(`🗑️ Removed **${row.company}** from watchlist.`);
         return;
       }
 
       if (text === "/sync") {
-        await conversation.send({ type: "text", payload: { text: "🔄 Syncing job listings... this may take a few minutes." } });
+        await send("🔄 Syncing job listings... this may take a few minutes.");
         const { newJobs, sitesScanned } = await scanSites();
-        await conversation.send({ type: "text", payload: { text: `✅ Sync complete — scanned **${sitesScanned}** site(s), found **${newJobs.length}** new job(s).` } });
+        await send(`✅ Sync complete — scanned **${sitesScanned}** site(s), found **${newJobs.length}** new job(s).`);
         return;
       }
 
       if (text.startsWith("/addkw ")) {
         const keyword = text.slice(7).trim().toLowerCase();
         if (!keyword) {
-          await conversation.send({ type: "text", payload: { text: "⚠️ Format: `/addkw software`" } });
+          await send("⚠️ Format: `/addkw software`");
           return;
         }
         await KeywordsTable.upsertRows({
           rows: [{ keyword, addedAt: new Date().toISOString() }],
           keyColumn: "keyword",
         });
-        await conversation.send({ type: "text", payload: { text: `✅ Keyword **"${keyword}"** added to job alert filter.` } });
+        await send(`✅ Keyword **"${keyword}"** added to job alert filter.`);
         return;
       }
 
@@ -164,31 +178,31 @@ export const DiscordConversation = new Conversation({
         const { rows } = await KeywordsTable.findRows({ limit: 200 });
         const row = rows.find((r) => r.keyword === keyword);
         if (!row) {
-          await conversation.send({ type: "text", payload: { text: `⚠️ Keyword **"${keyword}"** not found. Use \`/keywords\` to see active filters.` } });
+          await send(`⚠️ Keyword **"${keyword}"** not found. Use \`/keywords\` to see active filters.`);
           return;
         }
         await KeywordsTable.deleteRows({ ids: [row.id] });
-        await conversation.send({ type: "text", payload: { text: `🗑️ Keyword **"${keyword}"** removed.` } });
+        await send(`🗑️ Keyword **"${keyword}"** removed.`);
         return;
       }
 
       if (text === "/keywords") {
         const { rows } = await KeywordsTable.findRows({ limit: 200 });
         if (rows.length === 0) {
-          await conversation.send({ type: "text", payload: { text: "📋 No keyword filters set — all new jobs are reported. Use `/addkw <keyword>` to add one." } });
+          await send("📋 No keyword filters set — all new jobs are reported. Use `/addkw <keyword>` to add one.");
         } else {
           const list = rows.map((r) => `• ${r.keyword}`).join("\n");
-          await conversation.send({ type: "text", payload: { text: `📋 Active keyword filters (${rows.length}):\n\n${list}` } });
+          await send(`📋 Active keyword filters (${rows.length}):\n\n${list}`);
         }
         return;
       }
 
-      await conversation.send({ type: "text", payload: { text: ADD_LINK_HELP } });
+      await send(ADD_LINK_HELP);
       return;
     }
 
-    // --- General channel ---
-    if (discordChannelId === GENERAL_CHANNEL_ID) {
+    // --- General channel (or thread within it) ---
+    if (isGeneralChannel) {
       if (text === "/help") {
         await conversation.send({ type: "text", payload: { text: GENERAL_HELP } });
         return;
@@ -208,3 +222,31 @@ Rules:
     }
   },
 });
+
+export const DiscordThreadConversation = new Conversation({
+  channel: "discord.publicThread",
+
+  async handler({ message, conversation }) {
+    console.log(`[discord thread] conversation tags:`, JSON.stringify(conversation.tags));
+    console.log(`[discord thread] conversation id:`, conversation.id);
+    if (message?.type === "text") {
+      console.log(`[discord thread] message tags:`, JSON.stringify(message.tags));
+      console.log(`[discord thread] message text:`, message.payload.text);
+    }
+    // Thread messages are replies from users inside a thread the bot created.
+    // The bot posts to threads proactively via workflows — no command handling needed here.
+  },
+});
+
+function splitIntoChunks(text: string, maxLen: number): string[] {
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    const cut = remaining.lastIndexOf("\n", maxLen);
+    const splitAt = cut > 0 ? cut : maxLen;
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}

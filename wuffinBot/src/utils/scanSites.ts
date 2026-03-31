@@ -1,32 +1,40 @@
 import { actions, adk, z } from "@botpress/runtime";
-import { WatchedSitesTable } from "../tables/WatchedSitesTable";
-import { JobsTable } from "../tables/JobsTable";
-import { DailyNewJobsTable } from "../tables/DailyNewJobsTable";
 import { extractJobLinks } from "./extractJobLinks";
+
+function resolveUrl(href: string, baseUrl: string): string {
+  try {
+    return new URL(href, baseUrl).href;
+  } catch {
+    return href;
+  }
+}
+import { WatchedSitesTable } from "../tables/WatchedSitesTable";
+import { LinksTable } from "../tables/LinksTable";
+import { DailyNewJobsTable } from "../tables/DailyNewJobsTable";
 
 export type NewJob = {
   company: string;
   title: string;
   url: string;
-  description?: string;
+  summary?: string;
   experience?: string;
 };
 
 const JobDetails = z.object({
   isJob: z.boolean().describe("Whether this page is actually a job posting"),
-  title: z.string().describe("The job title as shown on the page"),
-  description: z.string().optional().describe("Brief summary of the role"),
+  title: z.string().optional().describe("The job title as shown on the page"),
+  summary: z.string().optional().describe("Brief summary of the role"),
   experience: z.string().optional().describe("Required experience level or years (e.g. '3+ years', 'Entry level')"),
 });
 
-async function parseJobPage(url: string): Promise<{ isJob: boolean; title?: string; description?: string; experience?: string }> {
+async function parseJobPage(url: string): Promise<{ isJob: boolean; title?: string; summary?: string; experience?: string }> {
   try {
     const { results } = await actions.browser.browsePages({ urls: [url], waitFor: 10000 });
     const result = results[0] as any;
     const markdown: string = result?.content ?? (typeof result === "string" ? result : JSON.stringify(result));
 
     const details = await adk.zai.extract(markdown, JobDetails, {
-      instructions: "Determine if this page is a job posting. If yes, extract the job title, a brief description of the role, and the required experience. If this is not a job posting (e.g. it's a login page, homepage, or unrelated page), set isJob to false.",
+      instructions: "Determine if this page is a job posting. If yes, extract the job title, a brief summary of the role, and the required experience. If this is not a job posting (e.g. it's a login page, homepage, or unrelated page), set isJob to false and leave other fields empty.",
     });
 
     return details;
@@ -57,7 +65,7 @@ export async function scanSites(): Promise<{ newJobs: NewJob[]; sitesScanned: nu
 
     let markdown: string | undefined;
     try {
-      const { results } = await actions.browser.browsePages({ urls: [site.url], waitFor: 30000 });
+      const { results } = await actions.browser.browsePages({ urls: [site.url], waitFor: 10000, timeout: 30000 });
       const result = results[0] as any;
       markdown = result?.content ?? (typeof result === "string" ? result : JSON.stringify(result));
     } catch (err) {
@@ -65,62 +73,58 @@ export async function scanSites(): Promise<{ newJobs: NewJob[]; sitesScanned: nu
       continue;
     }
 
-    if (!markdown) continue;
+    if (!markdown) {
+      console.log(`[scanSites] empty markdown for ${site.company}`);
+      continue;
+    }
 
-    const links = extractJobLinks(markdown);
+    console.log(`[scanSites] full markdown for ${site.company}:\n${markdown}`);
+
+    const rawLinks = extractJobLinks(markdown);
+    const links = rawLinks.map((l) => ({ title: l.title, url: resolveUrl(l.url, site.url) }));
     console.log(`[scanSites] ${site.company} — ${links.length} link(s) extracted`);
 
     for (const link of links) {
       const jobKey = link.url;
-      const { rows: existing } = await JobsTable.findRows({ filter: { jobKey }, limit: 1 });
+      const { rows: existing } = await LinksTable.findRows({ filter: { jobKey }, limit: 1 });
 
-      // Already in table (job or SKIP) — just update lastSeenAt
+      // Already in table — update lastSeenAt only
       if (existing.length > 0) {
-        await JobsTable.updateRows({ rows: [{ id: existing[0].id, lastSeenAt: today }] });
+        await LinksTable.updateRows({ rows: [{ id: existing[0].id, lastSeenAt: today }] });
         continue;
       }
 
-      // New link — parse the job page
+      // New link — parse the job page with zai
       console.log(`[scanSites] parsing new link: ${link.url}`);
       const details = await parseJobPage(link.url);
 
-      if (!details.isJob) {
-        // Not a job — store with SKIP prefix so we never fetch it again
-        await JobsTable.createRows({
-          rows: [{
-            jobKey,
-            company: site.company,
-            title: `SKIP:${link.title}`,
-            url: link.url,
-            firstSeenAt: today,
-            lastSeenAt: today,
-          }],
-        });
-        console.log(`[scanSites] skipped non-job: ${link.url}`);
-        continue;
-      }
+      const title = details.isJob ? (details.title ?? "") : "";
 
-      // Real job — store with extracted details
-      const jobTitle = details.title ?? link.title;
-      await JobsTable.createRows({
+      await LinksTable.createRows({
         rows: [{
           jobKey,
           company: site.company,
-          title: jobTitle,
-          description: details.description,
-          experience: details.experience,
           url: link.url,
+          title: title || undefined,
+          summary: details.summary,
+          experience: details.experience,
           firstSeenAt: today,
           lastSeenAt: today,
         }],
       });
 
+      // Only report jobs where zai confirmed a valid title
+      if (!title) {
+        console.log(`[scanSites] invalid/non-job link stored: ${link.url}`);
+        continue;
+      }
+
       await DailyNewJobsTable.createRows({
         rows: [{
           jobKey,
           company: site.company,
-          title: jobTitle,
-          description: details.description,
+          title,
+          summary: details.summary,
           experience: details.experience,
           url: link.url,
           foundAt: today,
@@ -129,9 +133,9 @@ export async function scanSites(): Promise<{ newJobs: NewJob[]; sitesScanned: nu
 
       newJobs.push({
         company: site.company,
-        title: jobTitle,
+        title,
         url: link.url,
-        description: details.description,
+        summary: details.summary,
         experience: details.experience,
       });
     }
@@ -140,61 +144,43 @@ export async function scanSites(): Promise<{ newJobs: NewJob[]; sitesScanned: nu
   return { newJobs, sitesScanned: sites.length };
 }
 
-export async function seedSite(company: string, url: string): Promise<number> {
+export async function seedSite(company: string, url: string): Promise<{ seeded: number; links: { title: string; url: string }[] }> {
   const today = new Date().toISOString().split("T")[0]!;
 
   let markdown: string | undefined;
   try {
-    const { results } = await actions.browser.browsePages({ urls: [url], waitFor: 30000 });
+    const { results } = await actions.browser.browsePages({ urls: [url], waitFor: 10000, timeout: 30000 });
     const result = results[0] as any;
     markdown = result?.content ?? (typeof result === "string" ? result : JSON.stringify(result));
   } catch (err) {
     console.error(`[seedSite] Failed to fetch ${company}:`, String(err));
-    return 0;
+    return { seeded: 0, links: [] };
   }
 
-  if (!markdown) return 0;
+  if (!markdown) {
+    console.log(`[seedSite] empty markdown for ${company}`);
+    return { seeded: 0, links: [] };
+  }
 
-  const links = extractJobLinks(markdown);
+  console.log(`[seedSite] full markdown for ${company}:\n${markdown}`);
+
+  const rawLinks = extractJobLinks(markdown);
+  const links = rawLinks.map((l) => ({ title: l.title, url: resolveUrl(l.url, url) }));
   console.log(`[seedSite] ${company} — ${links.length} link(s) extracted`);
-  if (links.length > 0) {
-    console.log(`[seedSite] sample links:\n${links.slice(0, 5).map((l) => `  "${l.title}" → ${l.url}`).join("\n")}`);
-  } else {
-    console.log(`[seedSite] markdown preview:\n${markdown.slice(0, 1000)}`);
-  }
 
   let seeded = 0;
 
   for (const link of links) {
     const jobKey = link.url;
-    const { rows: existing } = await JobsTable.findRows({ filter: { jobKey }, limit: 1 });
-    if (existing.length > 0) continue; // already known
+    const { rows: existing } = await LinksTable.findRows({ filter: { jobKey }, limit: 1 });
+    if (existing.length > 0) continue;
 
-    console.log(`[seedSite] parsing: "${link.title}" → ${link.url}`);
-    const details = await parseJobPage(link.url);
-    console.log(`[seedSite] result: isJob=${details.isJob}, title="${details.title}"`);
-
-    if (!details.isJob) {
-      await JobsTable.createRows({
-        rows: [{
-          jobKey,
-          company,
-          title: `SKIP:${link.title}`,
-          url: link.url,
-          firstSeenAt: today,
-          lastSeenAt: today,
-        }],
-      });
-      continue;
-    }
-
-    await JobsTable.createRows({
+    // Store link immediately — no zai during seed (fast)
+    // Daily scan will parse truly new links and populate title/summary
+    await LinksTable.createRows({
       rows: [{
         jobKey,
         company,
-        title: details.title ?? link.title,
-        description: details.description,
-        experience: details.experience,
         url: link.url,
         firstSeenAt: today,
         lastSeenAt: today,
@@ -203,5 +189,5 @@ export async function seedSite(company: string, url: string): Promise<number> {
     seeded++;
   }
 
-  return seeded;
+  return { seeded, links };
 }
