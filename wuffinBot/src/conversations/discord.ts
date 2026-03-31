@@ -4,7 +4,6 @@ import { LinksTable } from "../tables/LinksTable";
 import { KeywordsTable } from "../tables/KeywordsTable";
 import { scanSites } from "../utils/scanSites";
 import { SeedSiteWorkflow } from "../workflows/seedSite";
-import { createDiscordThread, sendDiscordMessage } from "../utils/discordApi";
 
 const ADD_LINK_CHANNEL_ID = "1488275758391628077";
 const GENERAL_CHANNEL_ID = "1488249561234542754";
@@ -13,7 +12,7 @@ const ADD_LINK_HELP = [
   "**Commands — #add-link**",
   "`/add CompanyName URL` — watch a career page and seed current jobs",
   "`/list` — show watched sites with IDs",
-  "`/remove <id>` — stop watching a site",
+  "`/remove <company>` — stop watching a site",
   "`/sync` — manually scan all sites now",
   "`/addkw <keyword>` — add a keyword filter for job alerts",
   "`/rmkw <keyword>` — remove a keyword filter",
@@ -79,12 +78,17 @@ export const DiscordConversation = new Conversation({
     const isAddLinkChannel = discordChannelId === ADD_LINK_CHANNEL_ID || discordParentId === ADD_LINK_CHANNEL_ID;
     const isGeneralChannel = discordChannelId === GENERAL_CHANNEL_ID || discordParentId === GENERAL_CHANNEL_ID;
 
-    // Auto-save general channel Discord channel ID for daily digest
-    if (isGeneralChannel && !bot.state.discordInsightsChannelId) {
+    // Auto-save conversation IDs for proactive messaging
+    if (isGeneralChannel && !bot.state.discordInsightsConversationId) {
       bot.state.discordInsightsConversationId = conversation.id;
       bot.state.discordInsightsUserId = context.get("user", { optional: true })?.id;
       bot.state.discordInsightsChannelId = GENERAL_CHANNEL_ID;
-      console.log(`[discord] saved general channel: channelId=${GENERAL_CHANNEL_ID}`);
+      console.log(`[discord] saved general channel conv=${conversation.id}`);
+    }
+    if (isAddLinkChannel && !bot.state.discordAddLinkConversationId) {
+      bot.state.discordAddLinkConversationId = conversation.id;
+      bot.state.discordAddLinkUserId = context.get("user", { optional: true })?.id;
+      console.log(`[discord] saved add-link channel conv=${conversation.id}`);
     }
 
     if (message?.type !== "text") return;
@@ -115,7 +119,7 @@ export const DiscordConversation = new Conversation({
           keyColumn: "url",
         });
 
-        await SeedSiteWorkflow.start({ company, url, channelId: ADD_LINK_CHANNEL_ID });
+        await SeedSiteWorkflow.start({ company, url });
 
         await send(`⏳ **${company}** added — seeding links in the background. Results will appear shortly.`);
         return;
@@ -126,21 +130,21 @@ export const DiscordConversation = new Conversation({
         if (rows.length === 0) {
           await send("📋 No sites watched yet. Use `/add CompanyName URL` to add one.");
         } else {
-          const list = rows.map((r) => `\`${r.id}\` **${r.company}** — ${r.url}`).join("\n");
+          const list = rows.map((r) => `• **${r.company}** — ${r.url}`).join("\n");
           await send(`📋 Watching ${rows.length} site(s):\n\n${list}`);
         }
         return;
       }
 
       if (text.startsWith("/remove ")) {
-        const id = text.slice(8).trim();
+        const name = text.slice(8).trim().toLowerCase();
         const { rows } = await WatchedSitesTable.findRows({ limit: 100 });
-        const row = rows.find((r) => r.id === id);
+        const row = rows.find((r) => r.company.toLowerCase() === name);
         if (!row) {
-          await send(`⚠️ No site found with ID \`${id}\`. Use \`/list\` to see IDs.`);
+          await send(`⚠️ No site found named \`${name}\`. Use \`/list\` to see names.`);
           return;
         }
-        await WatchedSitesTable.deleteRows({ ids: [row.id] });
+        await WatchedSitesTable.deleteRows({ url: row.url });
         await send(`🗑️ Removed **${row.company}** from watchlist.`);
         return;
       }

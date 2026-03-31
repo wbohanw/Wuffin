@@ -1,7 +1,6 @@
 import { Workflow, z, bot } from "@botpress/runtime";
 import { KeywordsTable } from "../tables/KeywordsTable";
 import { scanSites, type NewJob } from "../utils/scanSites";
-import { sendDiscordMessage } from "../utils/discordApi";
 
 export const DailyJobDigestWorkflow = new Workflow({
   name: "dailyJobDigest",
@@ -13,17 +12,18 @@ export const DailyJobDigestWorkflow = new Workflow({
     lastRunAt: z.string().optional(),
   }),
 
-  async handler({ state, step }) {
+  async handler({ state, step, client }) {
     const today = new Date().toISOString().split("T")[0]!;
-    const channelId = bot.state.discordInsightsChannelId;
+    const conversationId = bot.state.discordInsightsConversationId;
+    const userId = bot.state.discordInsightsUserId;
 
-    if (!channelId) {
-      console.log("[dailyJobDigest] No Discord channel ID saved — send any message in #general first.");
+    if (!conversationId || !userId) {
+      console.log("[dailyJobDigest] No Discord channel — send any message in #general first.");
       return;
     }
 
     const sendMessage = async (text: string) => {
-      await sendDiscordMessage(channelId, text);
+      await client.createMessage({ conversationId, userId, type: "text", payload: { text }, tags: {} });
     };
 
     const { newJobs, sitesScanned } = await step("scan", async () => {

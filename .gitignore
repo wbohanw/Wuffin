@@ -1,3 +1,4 @@
 /wuffinBot/.adk
 /wuffinBot/node_modules
 wuffinBot/tsconfig.json
+wuffinBot/agent.config.ts
