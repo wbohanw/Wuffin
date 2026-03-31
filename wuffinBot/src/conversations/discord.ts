@@ -1,12 +1,15 @@
-import { Conversation, Autonomous, bot, context, z, actions } from "@botpress/runtime";
+import { Conversation, Autonomous, z, actions } from "@botpress/runtime";
 import { WatchedSitesTable } from "../tables/WatchedSitesTable";
 import { LinksTable } from "../tables/LinksTable";
 import { KeywordsTable } from "../tables/KeywordsTable";
 import { scanSites } from "../utils/scanSites";
 import { SeedSiteWorkflow } from "../workflows/seedSite";
+import { buildInsightChunks } from "../utils/insightMessage";
 
 const ADD_LINK_CHANNEL_ID = "1488275758391628077";
+const ADD_LINK_CHANNEL_ID_2 = "1488611149044781238";
 const GENERAL_CHANNEL_ID = "1488249561234542754";
+const INSIGHT_CHANNEL_ID = "1488631745115848989";
 
 const ADD_LINK_HELP = [
   "**Commands — #add-link**",
@@ -31,14 +34,16 @@ const GENERAL_HELP = [
 
 const searchJobs = new Autonomous.Tool({
   name: "searchJobs",
-  description: "Search the job listings database. Filter by company, title keyword, location, or whether added today.",
+  description: "Search the job listings database. Filter by company, title keyword, location, experience level, job type, or whether added today.",
   input: z.object({
     company: z.string().optional().describe("Filter by company name (partial match)"),
     titleKeyword: z.string().optional().describe("Filter by keyword in job title"),
-    location: z.string().optional().describe("Filter by location keyword in summary (e.g. Toronto, Remote)"),
+    location: z.string().optional().describe("Filter by location (partial match against the location field, e.g. Toronto, Remote)"),
+    experience: z.enum(["entry", "junior", "senior"]).optional().describe("entry = <1 yr, junior = 1-3 yrs, senior = 3+ yrs"),
+    jobType: z.enum(["full-time", "part-time", "intern", "contract"]).optional().describe("Filter by employment type"),
     addedToday: z.boolean().optional().describe("If true, only return jobs first seen today"),
   }),
-  handler: async ({ company, titleKeyword, location, addedToday }) => {
+  handler: async ({ company, titleKeyword, location, experience, jobType, addedToday }) => {
     const { rows } = await LinksTable.findRows({ limit: 500 });
     const today = new Date().toISOString().split("T")[0]!;
 
@@ -46,7 +51,9 @@ const searchJobs = new Autonomous.Tool({
       if (!job.title) return false; // invalid/non-job link
       if (company && !job.company.toLowerCase().includes(company.toLowerCase())) return false;
       if (titleKeyword && !job.title.toLowerCase().includes(titleKeyword.toLowerCase())) return false;
-      if (location && !job.summary?.toLowerCase().includes(location.toLowerCase())) return false;
+      if (location && !job.location?.toLowerCase().includes(location.toLowerCase())) return false;
+      if (experience && job.experience !== experience) return false;
+      if (jobType && job.jobType !== jobType) return false;
       if (addedToday && job.firstSeenAt !== today) return false;
       return true;
     });
@@ -59,6 +66,8 @@ const searchJobs = new Autonomous.Tool({
         company: j.company,
         title: j.title!,
         experience: j.experience ?? "N/A",
+        location: j.location ?? "N/A",
+        jobType: j.jobType ?? "N/A",
         summary: j.summary ?? "N/A",
         url: j.url,
         firstSeenAt: j.firstSeenAt,
@@ -75,21 +84,12 @@ export const DiscordConversation = new Conversation({
     const discordParentId = conversation.tags["discord:parentId"] ?? conversation.tags["discord:parent_id"];
     console.log(`[discord] conversation tags:`, JSON.stringify(conversation.tags));
 
-    const isAddLinkChannel = discordChannelId === ADD_LINK_CHANNEL_ID || discordParentId === ADD_LINK_CHANNEL_ID;
+    const isAddLinkChannel =
+      discordChannelId === ADD_LINK_CHANNEL_ID || discordParentId === ADD_LINK_CHANNEL_ID ||
+      discordChannelId === ADD_LINK_CHANNEL_ID_2 || discordParentId === ADD_LINK_CHANNEL_ID_2;
     const isGeneralChannel = discordChannelId === GENERAL_CHANNEL_ID || discordParentId === GENERAL_CHANNEL_ID;
+    const isInsightChannel = discordChannelId === INSIGHT_CHANNEL_ID || discordParentId === INSIGHT_CHANNEL_ID;
 
-    // Auto-save conversation IDs for proactive messaging
-    if (isGeneralChannel && !bot.state.discordInsightsConversationId) {
-      bot.state.discordInsightsConversationId = conversation.id;
-      bot.state.discordInsightsUserId = context.get("user", { optional: true })?.id;
-      bot.state.discordInsightsChannelId = GENERAL_CHANNEL_ID;
-      console.log(`[discord] saved general channel conv=${conversation.id}`);
-    }
-    if (isAddLinkChannel && !bot.state.discordAddLinkConversationId) {
-      bot.state.discordAddLinkConversationId = conversation.id;
-      bot.state.discordAddLinkUserId = context.get("user", { optional: true })?.id;
-      console.log(`[discord] saved add-link channel conv=${conversation.id}`);
-    }
 
     if (message?.type !== "text") return;
     const text = message.payload.text.trim();
@@ -178,7 +178,7 @@ export const DiscordConversation = new Conversation({
           await send(`⚠️ Keyword **"${keyword}"** not found. Use \`/keywords\` to see active filters.`);
           return;
         }
-        await KeywordsTable.deleteRows({ ids: [row.id] });
+        await KeywordsTable.deleteRowIds([row.id]);
         await send(`🗑️ Keyword **"${keyword}"** removed.`);
         return;
       }
@@ -195,6 +195,17 @@ export const DiscordConversation = new Conversation({
       }
 
       await send(ADD_LINK_HELP);
+      return;
+    }
+
+    // --- Insight channel ---
+    if (isInsightChannel) {
+      if (text === "/insight") {
+        const chunks = await buildInsightChunks();
+        for (const chunk of chunks) {
+          await conversation.send({ type: "text", payload: { text: chunk } });
+        }
+      }
       return;
     }
 

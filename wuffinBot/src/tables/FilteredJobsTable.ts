@@ -1,9 +1,9 @@
 import { Table, z } from "@botpress/runtime";
 import { ExperienceLevel, JobType } from "./LinksTable";
 
-export const DailyNewJobsTable = new Table({
-  name: "DailyNewJobsTable",
-  description: "Today's newly discovered job postings — cleared and repopulated on each daily scan",
+export const FilteredJobsTable = new Table({
+  name: "FilteredJobsTable",
+  description: "Today's keyword-filtered jobs — cleared and repopulated by the FilteringWorkflow",
   keyColumn: "jobKey",
   columns: {
     jobKey: z.string().describe("Job URL (unique identifier)"),
@@ -14,6 +14,6 @@ export const DailyNewJobsTable = new Table({
     location: z.string().optional(),
     jobType: JobType.optional(),
     summary: z.string().optional(),
-    foundAt: z.string().describe("ISO date this job was first found"),
+    firstSeenAt: z.string(),
   },
 });

@@ -1,25 +1,12 @@
-import { Workflow, z, actions } from "@botpress/runtime";
+import { Workflow, z } from "@botpress/runtime";
 import { LinksTable } from "../tables/LinksTable";
 import { KeywordsTable } from "../tables/KeywordsTable";
 import { FilteredJobsTable } from "../tables/FilteredJobsTable";
-import { scanSites } from "../utils/scanSites";
-import { buildInsightChunks } from "../utils/insightMessage";
 
-const INSIGHT_CHANNEL_ID = "1488631745115848989";
-
-const sendToDiscord = async (channelId: string, text: string) => {
-  await actions.discord.callApi({
-    path: `/channels/${channelId}/messages`,
-    method: "POST",
-    body: JSON.stringify({ content: text }),
-  });
-};
-
-export const DailyJobDigestWorkflow = new Workflow({
-  name: "dailyJobDigest",
-  description: "Scan career pages, filter by keywords, and send the daily insight to Discord",
-  schedule: "0 9 * * *",
-  timeout: "2h",
+export const FilteringWorkflow = new Workflow({
+  name: "filtering",
+  description: "Rebuild FilteredJobsTable with today's jobs that match any active keyword filter",
+  timeout: "10m",
 
   state: z.object({
     lastRunAt: z.string().optional(),
@@ -28,32 +15,35 @@ export const DailyJobDigestWorkflow = new Workflow({
   async handler({ state, step }) {
     const today = new Date().toISOString().split("T")[0]!;
 
-    // Step 1: scan all watched sites for new links
-    await step("scan", async () => {
-      await scanSites();
-    });
-
-    // Step 2: filter today's jobs by keywords into FilteredJobsTable
     await step("filter", async () => {
+      // Load keywords
       const { rows: kwRows } = await KeywordsTable.findRows({ limit: 200 });
       const keywords = kwRows.map((r) => r.keyword.toLowerCase());
 
+      // Get today's valid jobs from LinksTable
       const { rows: allLinks } = await LinksTable.findRows({ limit: 1000 });
-      const todayJobs = allLinks.filter((r) => r.title && r.firstSeenAt === today);
+      const todayJobs = allLinks.filter(
+        (r) => r.title && r.firstSeenAt === today
+      );
 
+      // Apply keyword filter (if no keywords set, include all today's jobs)
       const filtered = keywords.length === 0
         ? todayJobs
         : todayJobs.filter((j) =>
             keywords.some((kw) => j.title!.toLowerCase().includes(kw))
           );
 
-      console.log(`[dailyJobDigest] ${todayJobs.length} job(s) today → ${filtered.length} after keyword filter`);
+      console.log(
+        `[filtering] ${todayJobs.length} job(s) today → ${filtered.length} match keyword filter [${keywords.join(", ") || "none — showing all"}]`
+      );
 
-      // Overwrite FilteredJobsTable
+      // Clear existing rows
       const { rows: existing } = await FilteredJobsTable.findRows({ limit: 1000 });
       if (existing.length > 0) {
         await FilteredJobsTable.deleteRowIds(existing.map((r) => r.id));
       }
+
+      // Insert filtered jobs
       if (filtered.length > 0) {
         await FilteredJobsTable.createRows({
           rows: filtered.map((j) => ({
@@ -69,14 +59,8 @@ export const DailyJobDigestWorkflow = new Workflow({
           })),
         });
       }
-    });
 
-    // Step 3: send insight digest to Discord
-    await step("send-insight", async () => {
-      const chunks = await buildInsightChunks();
-      for (const chunk of chunks) {
-        await sendToDiscord(INSIGHT_CHANNEL_ID, chunk);
-      }
+      console.log(`[filtering] FilteredJobsTable updated with ${filtered.length} job(s)`);
     });
 
     state.lastRunAt = today;
