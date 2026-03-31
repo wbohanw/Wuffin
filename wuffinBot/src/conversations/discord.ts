@@ -4,6 +4,7 @@ import { LinksTable } from "../tables/LinksTable";
 import { KeywordsTable } from "../tables/KeywordsTable";
 import { scanSites } from "../utils/scanSites";
 import { SeedSiteWorkflow } from "../workflows/seedSite";
+import { createDiscordThread, sendDiscordMessage } from "../utils/discordApi";
 
 const ADD_LINK_CHANNEL_ID = "1488275758391628077";
 const GENERAL_CHANNEL_ID = "1488249561234542754";
@@ -114,17 +115,9 @@ export const DiscordConversation = new Conversation({
           keyColumn: "url",
         });
 
-        const messageId = message.tags["discord:id"] ?? "";
-        const channelId = discordChannelId ?? ADD_LINK_CHANNEL_ID;
+        await SeedSiteWorkflow.start({ company, url, channelId: ADD_LINK_CHANNEL_ID });
 
-        await SeedSiteWorkflow.start({
-          company,
-          url,
-          messageId,
-          channelId,
-        });
-
-        await send(`⏳ **${company}** added — seeding links in the background. Results will appear in a thread shortly.`);
+        await send(`⏳ **${company}** added — seeding links in the background. Results will appear shortly.`);
         return;
       }
 
