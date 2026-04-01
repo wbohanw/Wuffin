@@ -62,6 +62,51 @@ wuffinBot/
         └── seedSite.ts           # Initial site seeding on /add
 ```
 
+## Channel Registration
+
+Channels must be registered before the bot responds to commands in them. The **general channel** is the only exception — it's hardcoded and always active as a conversational AI chatbot.
+
+### Registering a channel
+
+In the channel you want to register, send:
+
+```
+@wuffin /regist-channel:<type>
+```
+
+The bot verifies it was actually mentioned (not another user or role) by comparing the mention ID against its own Discord user ID. If they match, the channel is registered.
+
+**Examples:**
+```
+@wuffin /regist-channel:add-link
+@wuffin /regist-channel:insight
+```
+
+### Channel types
+
+| Type | Purpose |
+|------|---------|
+| `add-link` | Manage watched career pages. Supports `/add`, `/remove`, `/list`, `/sync`, `/addkw`, `/rmkw`, `/keywords`, `/help`. |
+| `insight` | Receives the daily job digest and supports `/insight` to post it on demand. |
+
+### Rules
+
+- A channel can only be registered once. Attempting to re-register replies with: `⛔ This channel is already registered as <type>. Please contact admin to change it.`
+- Unregistered channels are completely ignored.
+- The general channel is never registered via this system.
+
+### Debug
+
+To confirm the bot is online and check its Discord user ID:
+
+```
+@wuffin /debug
+```
+
+The bot replies with `meRes parsed bot id = <id>`.
+
+---
+
 ## Running Locally
 
 ### Prerequisites
