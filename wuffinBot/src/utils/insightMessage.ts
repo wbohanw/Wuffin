@@ -1,27 +1,36 @@
 import { FilteredJobsTable } from "../tables/FilteredJobsTable";
 
-export async function buildInsightChunks(): Promise<string[]> {
-  const { rows } = await FilteredJobsTable.findRows({ limit: 500 });
+type Job = {
+  company: string;
+  title: string;
+  url: string;
+};
 
-  if (rows.length === 0) return ["No new jobs found today."];
+export function buildChunksFromJobs(jobs: Job[]): string[] {
+  if (jobs.length === 0) return ["No new jobs found today."];
 
-  const byCompany = new Map<string, typeof rows>();
-  for (const job of rows) {
+  const byCompany = new Map<string, Job[]>();
+  for (const job of jobs) {
     const list = byCompany.get(job.company) ?? [];
     list.push(job);
     byCompany.set(job.company, list);
   }
 
-  let msg = `New jobs found: ${rows.length}\n\n`;
-  for (const [company, jobs] of byCompany) {
+  let msg = `New jobs found: ${jobs.length}\n\n`;
+  for (const [company, companyJobs] of byCompany) {
     msg += `**${company}:**\n`;
-    for (const job of jobs) {
-      msg += `${job.title}: ${job.url}\n`;
+    for (const job of companyJobs) {
+      msg += `${job.title}: <${job.url}>\n`;
     }
     msg += "\n";
   }
 
   return splitIntoChunks(msg.trimEnd(), 2000);
+}
+
+export async function buildInsightChunks(): Promise<string[]> {
+  const { rows } = await FilteredJobsTable.findRows({ limit: 500 });
+  return buildChunksFromJobs(rows);
 }
 
 function splitIntoChunks(text: string, maxLen: number): string[] {

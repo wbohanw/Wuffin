@@ -4,7 +4,6 @@ import { runEnrichLinks } from "../utils/runEnrichLinks";
 export const EnrichLinksWorkflow = new Workflow({
   name: "enrichLinks",
   description: "Enrich LinksTable rows that were seeded without zai parsing — fills in title, summary, experience, location, jobType",
-  schedule: "30 9 * * *",
   timeout: "2h",
 
   state: z.object({

@@ -4,6 +4,7 @@ import { LinksTable } from "../tables/LinksTable";
 import { KeywordsTable } from "../tables/KeywordsTable";
 import { FilteredJobsTable } from "../tables/FilteredJobsTable";
 import { ChannelsTable } from "../tables/ChannelsTable";
+import { SubscribersTable } from "../tables/SubscribersTable";
 import { SeedSiteWorkflow } from "../workflows/seedSite";
 import { SyncWorkflow } from "../workflows/sync";
 import { buildInsightChunks } from "../utils/insightMessage";
@@ -315,5 +316,104 @@ export const DiscordThreadConversation = new Conversation({
     if (message?.type === "text") {
       console.log(`[discord thread] text:`, message.payload.text);
     }
+  },
+});
+
+const DM_HELP = [
+  "**Wuffin DM Commands**",
+  "`/register` — subscribe to daily personal job digest",
+  "`/addkw <keyword>` — add a keyword filter for your digest",
+  "`/rmkw <keyword>` — remove a keyword filter",
+  "`/keywords` — list your active keyword filters",
+  "`/help` — show this message",
+  "",
+  "If you have no keywords set, you'll receive all of today's jobs.",
+].join("\n");
+
+export const DiscordDMConversation = new Conversation({
+  channel: "discord.dm",
+
+  async handler({ message, conversation }) {
+    if (message?.type !== "text") return;
+    const text = message.payload.text.trim();
+
+    const dmChannelId = conversation.tags["discord:id"];
+    const discordUserId = (message.tags as Record<string, string>)["discord:authorId"] ?? "unknown";
+
+    if (!dmChannelId) return;
+
+    const send = async (t: string) => conversation.send({ type: "text", payload: { text: t } });
+
+    const getSubscriber = async () => {
+      const { rows } = await SubscribersTable.findRows({ limit: 500 });
+      return rows.find((r) => r.dmChannelId === dmChannelId);
+    };
+
+    if (text === "/register") {
+      const existing = await getSubscriber();
+      if (existing) {
+        await send("✅ You're already registered! Use `/addkw <keyword>` to filter your digest.");
+        return;
+      }
+      await SubscribersTable.upsertRows({
+        rows: [{ dmChannelId, discordUserId, keywords: "", registeredAt: new Date().toISOString() }],
+        keyColumn: "dmChannelId",
+      });
+      await send("✅ Registered! You'll receive a personal job digest every morning at 9 AM.\n\nUse `/addkw <keyword>` to filter by keywords, or leave it empty to get all jobs.");
+      return;
+    }
+
+    if (text === "/help") {
+      await send(DM_HELP);
+      return;
+    }
+
+    // All other commands require registration
+    const subscriber = await getSubscriber();
+    if (!subscriber) {
+      await send("👋 You're not registered yet. Type `/register` to subscribe to daily job digests.");
+      return;
+    }
+
+    const parseKeywords = (s: string) => s ? s.split(",").map((k) => k.trim()).filter(Boolean) : [];
+
+    if (text.startsWith("/addkw ")) {
+      const keyword = text.slice(7).trim().toLowerCase();
+      if (!keyword) { await send("⚠️ Format: `/addkw software`"); return; }
+      const current = parseKeywords(subscriber.keywords);
+      if (current.includes(keyword)) { await send(`⚠️ Keyword **"${keyword}"** is already in your filters.`); return; }
+      const updated = [...current, keyword].join(",");
+      await SubscribersTable.upsertRows({
+        rows: [{ ...subscriber, keywords: updated }],
+        keyColumn: "dmChannelId",
+      });
+      await send(`✅ Keyword **"${keyword}"** added to your filters.`);
+      return;
+    }
+
+    if (text.startsWith("/rmkw ")) {
+      const keyword = text.slice(6).trim().toLowerCase();
+      const current = parseKeywords(subscriber.keywords);
+      if (!current.includes(keyword)) { await send(`⚠️ Keyword **"${keyword}"** not found. Use \`/keywords\` to see your filters.`); return; }
+      const updated = current.filter((k) => k !== keyword).join(",");
+      await SubscribersTable.upsertRows({
+        rows: [{ ...subscriber, keywords: updated }],
+        keyColumn: "dmChannelId",
+      });
+      await send(`🗑️ Keyword **"${keyword}"** removed.`);
+      return;
+    }
+
+    if (text === "/keywords") {
+      const current = parseKeywords(subscriber.keywords);
+      if (current.length === 0) {
+        await send("📋 No keyword filters set — you'll receive all jobs in your daily digest.");
+      } else {
+        await send(`📋 Your keyword filters (${current.length}):\n\n${current.map((k) => `• ${k}`).join("\n")}`);
+      }
+      return;
+    }
+
+    await send(DM_HELP);
   },
 });
