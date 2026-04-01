@@ -1,9 +1,8 @@
 import { Workflow, z, actions } from "@botpress/runtime";
 import { seedSite } from "../utils/scanSites";
+import { getChannelId } from "../utils/getChannelId";
 
-const ADD_LINK_CHANNEL_ID = "1488275758391628077";
-
-const send = async (channelId: string, text: string) => {
+const postToDiscord = async (channelId: string, text: string) => {
   await actions.discord.callApi({
     path: `/channels/${channelId}/messages`,
     method: "POST",
@@ -31,10 +30,13 @@ export const SeedSiteWorkflow = new Workflow({
     });
 
     await step("report", async () => {
+      const channelId = await getChannelId("add-link");
+      if (!channelId) { console.log("[seedSite] No add-link channel registered"); return; }
+
       if (links.length === 0) {
-        await send(ADD_LINK_CHANNEL_ID, `⚠️ **${company}** — no links extracted from that page. Check the URL or try a different career page.`);
+        await postToDiscord(channelId, `⚠️ **${company}** — no links extracted from that page. Check the URL or try a different career page.`);
       } else {
-        await send(ADD_LINK_CHANNEL_ID, `✅ **${company}** is live — seeded **${seeded}** new link(s) out of **${links.length}** found. You'll be notified of new ones daily.`);
+        await postToDiscord(channelId, `✅ **${company}** is live — seeded **${seeded}** new link(s) out of **${links.length}** found. You'll be notified of new ones daily.`);
       }
     });
   },

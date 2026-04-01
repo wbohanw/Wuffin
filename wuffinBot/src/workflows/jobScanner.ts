@@ -1,11 +1,8 @@
 import { Workflow, z, actions } from "@botpress/runtime";
-import { LinksTable } from "../tables/LinksTable";
-import { KeywordsTable } from "../tables/KeywordsTable";
-import { FilteredJobsTable } from "../tables/FilteredJobsTable";
 import { scanSites } from "../utils/scanSites";
+import { runFiltering } from "../utils/runFiltering";
 import { buildInsightChunks } from "../utils/insightMessage";
-
-const INSIGHT_CHANNEL_ID = "1488631745115848989";
+import { getChannelId } from "../utils/getChannelId";
 
 const sendToDiscord = async (channelId: string, text: string) => {
   await actions.discord.callApi({
@@ -28,54 +25,20 @@ export const DailyJobDigestWorkflow = new Workflow({
   async handler({ state, step }) {
     const today = new Date().toISOString().split("T")[0]!;
 
-    // Step 1: scan all watched sites for new links
     await step("scan", async () => {
       await scanSites();
     });
 
-    // Step 2: filter today's jobs by keywords into FilteredJobsTable
     await step("filter", async () => {
-      const { rows: kwRows } = await KeywordsTable.findRows({ limit: 200 });
-      const keywords = kwRows.map((r) => r.keyword.toLowerCase());
-
-      const { rows: allLinks } = await LinksTable.findRows({ limit: 1000 });
-      const todayJobs = allLinks.filter((r) => r.title && r.firstSeenAt === today);
-
-      const filtered = keywords.length === 0
-        ? todayJobs
-        : todayJobs.filter((j) =>
-            keywords.some((kw) => j.title!.toLowerCase().includes(kw))
-          );
-
-      console.log(`[dailyJobDigest] ${todayJobs.length} job(s) today → ${filtered.length} after keyword filter`);
-
-      // Overwrite FilteredJobsTable
-      const { rows: existing } = await FilteredJobsTable.findRows({ limit: 1000 });
-      if (existing.length > 0) {
-        await FilteredJobsTable.deleteRowIds(existing.map((r) => r.id));
-      }
-      if (filtered.length > 0) {
-        await FilteredJobsTable.createRows({
-          rows: filtered.map((j) => ({
-            jobKey: j.jobKey,
-            company: j.company,
-            title: j.title!,
-            url: j.url,
-            experience: j.experience,
-            location: j.location,
-            jobType: j.jobType,
-            summary: j.summary,
-            firstSeenAt: j.firstSeenAt,
-          })),
-        });
-      }
+      await runFiltering();
     });
 
-    // Step 3: send insight digest to Discord
     await step("send-insight", async () => {
+      const channelId = await getChannelId("insight");
+      if (!channelId) { console.log("[dailyJobDigest] No insight channel registered"); return; }
       const chunks = await buildInsightChunks();
       for (const chunk of chunks) {
-        await sendToDiscord(INSIGHT_CHANNEL_ID, chunk);
+        await sendToDiscord(channelId, chunk);
       }
     });
 
