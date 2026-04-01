@@ -1,5 +1,9 @@
 import { actions, adk, z } from "@botpress/runtime";
 import { extractJobLinks } from "./extractJobLinks";
+import { WatchedSitesTable } from "../tables/WatchedSitesTable";
+import { LinksTable, ExperienceLevel, JobType } from "../tables/LinksTable";
+import { DailyNewJobsTable } from "../tables/DailyNewJobsTable";
+import type { ExperienceLevel as ExperienceLevelType, JobType as JobTypeType } from "../tables/LinksTable";
 
 function resolveUrl(href: string, baseUrl: string): string {
   try {
@@ -8,36 +12,91 @@ function resolveUrl(href: string, baseUrl: string): string {
     return href;
   }
 }
-import { WatchedSitesTable } from "../tables/WatchedSitesTable";
-import { LinksTable } from "../tables/LinksTable";
-import { DailyNewJobsTable } from "../tables/DailyNewJobsTable";
 
 export type NewJob = {
   company: string;
   title: string;
   url: string;
   summary?: string;
-  experience?: string;
+  experience?: ExperienceLevelType;
+  location?: string;
+  jobType?: JobTypeType;
 };
 
 const JobDetails = z.object({
   isJob: z.boolean().describe("Whether this page is actually a job posting"),
-  title: z.string().optional().describe("The job title as shown on the page"),
-  summary: z.string().optional().describe("Brief summary of the role"),
-  experience: z.string().optional().describe("Required experience level or years (e.g. '3+ years', 'Entry level')"),
+  title: z.string().optional().describe("The job title in English (translate if needed)"),
+  summary: z.string().optional().describe("Brief 1-2 sentence summary of the role in English (translate if needed)"),
+  experienceRaw: z.string().optional().describe("Required experience as stated on the page (e.g. '5+ years', 'fresh grad', 'entry level')"),
+  location: z.string().optional().describe("Job location — city, country, or 'Remote'. Leave empty if not mentioned."),
+  jobType: z.string().optional().describe("Employment type: 'full-time', 'part-time', 'intern', or 'contract'. Leave empty if not mentioned."),
 });
 
-async function parseJobPage(url: string): Promise<{ isJob: boolean; title?: string; summary?: string; experience?: string }> {
+function mapExperience(raw?: string): ExperienceLevelType | undefined {
+  if (!raw) return undefined;
+  const s = raw.toLowerCase();
+  if (
+    s.includes("entry") || s.includes("junior") || s.includes("grad") ||
+    s.includes("0") || s.includes("fresh") || s.includes("intern") ||
+    /\bless than 1\b/.test(s) || /\b[<]?\s*1\s*year/.test(s)
+  ) {
+    // internships map to "entry" for experience but jobType handles intern separately
+    if (s.includes("intern") && !s.includes("entry") && !s.includes("junior") && !s.includes("senior")) {
+      return "entry";
+    }
+    return "entry";
+  }
+  if (
+    s.includes("1") || s.includes("2") || s.includes("3") ||
+    /1[-–]3\s*year/.test(s) || /[12]\+?\s*year/.test(s)
+  ) {
+    return "junior";
+  }
+  if (
+    s.includes("senior") || s.includes("lead") || s.includes("principal") ||
+    /3\+/.test(s) || /[4-9]\d*\s*\+?\s*year/.test(s)
+  ) {
+    return "senior";
+  }
+  return undefined;
+}
+
+function mapJobType(raw?: string): JobTypeType | undefined {
+  if (!raw) return undefined;
+  const s = raw.toLowerCase();
+  if (s.includes("intern")) return "intern";
+  if (s.includes("part")) return "part-time";
+  if (s.includes("contract") || s.includes("freelance")) return "contract";
+  if (s.includes("full")) return "full-time";
+  return undefined;
+}
+
+export async function parseJobPage(url: string): Promise<{
+  isJob: boolean;
+  title?: string;
+  summary?: string;
+  experience?: ExperienceLevelType;
+  location?: string;
+  jobType?: JobTypeType;
+}> {
   try {
     const { results } = await actions.browser.browsePages({ urls: [url], waitFor: 10000 });
     const result = results[0] as any;
     const markdown: string = result?.content ?? (typeof result === "string" ? result : JSON.stringify(result));
 
     const details = await adk.zai.extract(markdown, JobDetails, {
-      instructions: "Determine if this page is a job posting. If yes, extract the job title, a brief summary of the role, and the required experience. If this is not a job posting (e.g. it's a login page, homepage, or unrelated page), set isJob to false and leave other fields empty.",
+      instructions:
+        "Determine if this page is a job posting. If yes, extract the title, a brief summary, the raw experience requirement, the location, and the employment type. If this is not a job posting (e.g. login page, homepage, list page), set isJob to false. IMPORTANT: Always write the title and summary in English, translating from any other language if necessary.",
     });
 
-    return details;
+    return {
+      isJob: details.isJob,
+      title: details.title,
+      summary: details.summary,
+      experience: mapExperience(details.experienceRaw),
+      location: details.location,
+      jobType: mapJobType(details.jobType),
+    };
   } catch (err) {
     console.error(`[parseJobPage] Failed for ${url}:`, String(err));
     return { isJob: false };
@@ -50,7 +109,7 @@ export async function scanSites(): Promise<{ newJobs: NewJob[]; sitesScanned: nu
   // Clear yesterday's daily jobs
   const { rows: oldDaily } = await DailyNewJobsTable.findRows({ limit: 500 });
   if (oldDaily.length > 0) {
-    await DailyNewJobsTable.deleteRows({ ids: oldDaily.map((r) => r.id) });
+    await DailyNewJobsTable.deleteRowIds(oldDaily.map((r) => r.id));
   }
 
   const { rows: sites } = await WatchedSitesTable.findRows({ limit: 100 });
@@ -97,7 +156,6 @@ export async function scanSites(): Promise<{ newJobs: NewJob[]; sitesScanned: nu
       // New link — parse the job page with zai
       console.log(`[scanSites] parsing new link: ${link.url}`);
       const details = await parseJobPage(link.url);
-
       const title = details.isJob ? (details.title ?? "") : "";
 
       await LinksTable.createRows({
@@ -108,12 +166,14 @@ export async function scanSites(): Promise<{ newJobs: NewJob[]; sitesScanned: nu
           title: title || undefined,
           summary: details.summary,
           experience: details.experience,
+          location: details.location,
+          jobType: details.jobType,
           firstSeenAt: today,
           lastSeenAt: today,
+          parsedAt: today,
         }],
       });
 
-      // Only report jobs where zai confirmed a valid title
       if (!title) {
         console.log(`[scanSites] invalid/non-job link stored: ${link.url}`);
         continue;
@@ -126,18 +186,14 @@ export async function scanSites(): Promise<{ newJobs: NewJob[]; sitesScanned: nu
           title,
           summary: details.summary,
           experience: details.experience,
+          location: details.location,
+          jobType: details.jobType,
           url: link.url,
           foundAt: today,
         }],
       });
 
-      newJobs.push({
-        company: site.company,
-        title,
-        url: link.url,
-        summary: details.summary,
-        experience: details.experience,
-      });
+      newJobs.push({ company: site.company, title, url: link.url, summary: details.summary, experience: details.experience, location: details.location, jobType: details.jobType });
     }
   }
 
@@ -175,8 +231,7 @@ export async function seedSite(company: string, url: string): Promise<{ seeded: 
     const { rows: existing } = await LinksTable.findRows({ filter: { jobKey }, limit: 1 });
     if (existing.length > 0) continue;
 
-    // Store link immediately — no zai during seed (fast)
-    // Daily scan will parse truly new links and populate title/summary
+    // Store without zai — enrichLinks workflow will fill in title/summary/etc.
     await LinksTable.createRows({
       rows: [{
         jobKey,
@@ -184,6 +239,7 @@ export async function seedSite(company: string, url: string): Promise<{ seeded: 
         url: link.url,
         firstSeenAt: today,
         lastSeenAt: today,
+        // parsedAt intentionally omitted so enrichLinks picks it up
       }],
     });
     seeded++;

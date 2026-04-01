@@ -1,5 +1,15 @@
-import { Workflow, z, bot } from "@botpress/runtime";
+import { Workflow, z, actions } from "@botpress/runtime";
 import { seedSite } from "../utils/scanSites";
+
+const ADD_LINK_CHANNEL_ID = "1488275758391628077";
+
+const send = async (channelId: string, text: string) => {
+  await actions.discord.callApi({
+    path: `/channels/${channelId}/messages`,
+    method: "POST",
+    body: JSON.stringify({ content: text }),
+  });
+};
 
 export const SeedSiteWorkflow = new Workflow({
   name: "seedSite",
@@ -13,20 +23,8 @@ export const SeedSiteWorkflow = new Workflow({
 
   state: z.object({}),
 
-  async handler({ input, step, client }) {
+  async handler({ input, step }) {
     const { company, url } = input;
-
-    const conversationId = bot.state.discordAddLinkConversationId;
-    const userId = bot.state.discordAddLinkUserId;
-
-    if (!conversationId || !userId) {
-      console.log("[seedSite] No add-link conversation saved yet.");
-      return;
-    }
-
-    const send = async (text: string) => {
-      await client.createMessage({ conversationId, userId, type: "text", payload: { text }, tags: {} });
-    };
 
     const { seeded, links } = await step("seed", async () => {
       return await seedSite(company, url);
@@ -34,9 +32,9 @@ export const SeedSiteWorkflow = new Workflow({
 
     await step("report", async () => {
       if (links.length === 0) {
-        await send(`⚠️ **${company}** — no links extracted from that page. Check the URL or try a different career page.`);
+        await send(ADD_LINK_CHANNEL_ID, `⚠️ **${company}** — no links extracted from that page. Check the URL or try a different career page.`);
       } else {
-        await send(`✅ **${company}** is live — seeded **${seeded}** new link(s) out of **${links.length}** found. You'll be notified of new ones daily.`);
+        await send(ADD_LINK_CHANNEL_ID, `✅ **${company}** is live — seeded **${seeded}** new link(s) out of **${links.length}** found. You'll be notified of new ones daily.`);
       }
     });
   },
