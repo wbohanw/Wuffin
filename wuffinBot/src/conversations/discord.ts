@@ -359,7 +359,7 @@ export const DiscordDMConversation = new Conversation({
       const kws = subscriber.keywords || "";
       const locs = subscriber.locations || "";
       const exp = subscriber.experienceLevels || "";
-      return `/filter [${kws}] [${locs}] ${exp}`.trimEnd();
+      return `/filter [${kws}] [${locs}] [${exp}]`;
     };
 
     // --- /filter ---
@@ -383,7 +383,7 @@ export const DiscordDMConversation = new Conversation({
       }
 
       // Parse: /filter [kw1,kw2] [loc1,loc2] exp1,exp2
-      const match = text.match(/^\/filter\s+\[([^\]]*)\]\s+\[([^\]]*)\]\s*(.*)$/);
+      const match = text.match(/^\/filter\s+\[([^\]]*)\]\s+\[([^\]]*)\]\s+\[([^\]]*)\]$/) ?? text.match(/^\/filter\s+\[([^\]]*)\]\s+\[([^\]]*)\]\s*(.*)$/);
       if (!match) {
         await send("⚠️ Format: `/filter [kw1,kw2] [city,country] intern,entry`\nType `/filter` to see your current filters.");
         return;
