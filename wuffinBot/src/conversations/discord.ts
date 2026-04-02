@@ -1,7 +1,6 @@
 import { Conversation, Autonomous, z, actions } from "@botpress/runtime";
 import { WatchedSitesTable } from "../tables/WatchedSitesTable";
 import { LinksTable } from "../tables/LinksTable";
-import { KeywordsTable } from "../tables/KeywordsTable";
 import { FilteredJobsTable } from "../tables/FilteredJobsTable";
 import { ChannelsTable } from "../tables/ChannelsTable";
 import { SubscribersTable } from "../tables/SubscribersTable";
@@ -20,9 +19,6 @@ const ADD_LINK_HELP = [
   "`/list` — show watched sites",
   "`/remove <company>` — stop watching a site",
   "`/sync` — manually run scan → enrich → filter",
-  "`/addkw <keyword>` — add a keyword filter",
-  "`/rmkw <keyword>` — remove a keyword filter",
-  "`/keywords` — list active keyword filters",
   "`/help` — show this message",
 ].join("\n");
 
@@ -97,20 +93,18 @@ const getTodayJobs = new Autonomous.Tool({
 
 const getStats = new Autonomous.Tool({
   name: "getStats",
-  description: "Get summary stats: total jobs, watched companies, active keywords, today's new job count.",
+  description: "Get summary stats: total jobs, watched companies, today's new job count.",
   input: z.object({}),
   handler: async () => {
     const today = new Date().toISOString().split("T")[0]!;
-    const [{ rows: links }, { rows: sites }, { rows: keywords }, { rows: todayFiltered }] = await Promise.all([
+    const [{ rows: links }, { rows: sites }, { rows: todayFiltered }] = await Promise.all([
       LinksTable.findRows({ limit: 1000 }),
       WatchedSitesTable.findRows({ limit: 100 }),
-      KeywordsTable.findRows({ limit: 200 }),
       FilteredJobsTable.findRows({ limit: 500 }),
     ]);
     return {
       totalJobs: links.filter((r) => r.title).length,
       watchedCompanies: sites.length,
-      activeKeywords: keywords.map((k) => k.keyword),
       todayNewJobs: todayFiltered.length,
       date: today,
     };
@@ -261,34 +255,6 @@ Rules:
         return;
       }
 
-      if (text.startsWith("/addkw ")) {
-        const keyword = text.slice(7).trim().toLowerCase();
-        if (!keyword) { await send("⚠️ Format: `/addkw software`"); return; }
-        await KeywordsTable.upsertRows({ rows: [{ keyword, addedAt: new Date().toISOString() }], keyColumn: "keyword" });
-        await send(`✅ Keyword **"${keyword}"** added.`);
-        return;
-      }
-
-      if (text.startsWith("/rmkw ")) {
-        const keyword = text.slice(6).trim().toLowerCase();
-        const { rows } = await KeywordsTable.findRows({ limit: 200 });
-        const row = rows.find((r) => r.keyword === keyword);
-        if (!row) { await send(`⚠️ Keyword **"${keyword}"** not found. Use \`/keywords\` to see active filters.`); return; }
-        await KeywordsTable.deleteRowIds([row.id]);
-        await send(`🗑️ Keyword **"${keyword}"** removed.`);
-        return;
-      }
-
-      if (text === "/keywords") {
-        const { rows } = await KeywordsTable.findRows({ limit: 200 });
-        if (rows.length === 0) {
-          await send("📋 No keyword filters set — all new jobs are reported.");
-        } else {
-          await send(`📋 Active keyword filters (${rows.length}):\n\n${rows.map((r) => `• ${r.keyword}`).join("\n")}`);
-        }
-        return;
-      }
-
       await send(ADD_LINK_HELP);
       return;
     }
@@ -319,30 +285,27 @@ export const DiscordThreadConversation = new Conversation({
   },
 });
 
-const VALID_EXP_LEVELS = ["intern", "entry", "senior", "staff"] as const;
+const VALID_EXP_LEVELS = new Set(["intern", "entry", "senior", "staff"]);
 
 const DM_HELP = [
   "**Wuffin DM Commands**",
   "`/register` — subscribe to daily personal job digest",
+  "`/filter` — view your current filters + copy-paste command",
+  "`/filter [kw1,kw2] [city,country] exp1,exp2` — set all filters at once",
   "",
-  "**Title keywords** (partial match on job title)",
-  "`/addkw <keyword>` — e.g. `/addkw software`",
-  "`/rmkw <keyword>` — remove a title keyword",
-  "`/keywords` — list your title keywords",
+  "**Format:**",
+  "`[...]` = title keywords (partial match on job title)",
+  "`[...]` = locations (city / province / country, partial match)",
+  "last part = experience levels: `intern` `entry` `senior` `staff`",
   "",
-  "**Location filters** (partial match: city, province, or country)",
-  "`/addloc <location>` — e.g. `/addloc Toronto`",
-  "`/rmloc <location>` — remove a location filter",
-  "`/locations` — list your location filters",
-  "",
-  "**Experience level filters** (intern / entry / senior / staff)",
-  "`/addexp <level>` — e.g. `/addexp intern`",
-  "`/rmexp <level>` — remove an experience filter",
-  "`/myexp` — list your experience filters",
+  "**Examples:**",
+  "`/filter [software,engineer] [Toronto,Canada] intern,entry`",
+  "`/filter [] [Remote] senior,staff` — remote senior/staff only, any title",
+  "`/filter [] [] ` — clear all filters (receive everything)",
   "",
   "`/help` — show this message",
   "",
-  "All filters are AND'd together. Empty filter = match all.",
+  "All filters are AND'd. Empty bracket or omitted = match all.",
 ].join("\n");
 
 export const DiscordDMConversation = new Conversation({
@@ -367,7 +330,7 @@ export const DiscordDMConversation = new Conversation({
     if (text === "/register") {
       const existing = await getSubscriber();
       if (existing) {
-        await send("✅ You're already registered! Use `/addkw <keyword>` to filter your digest.");
+        await send("✅ You're already registered! Use `/filter` to view or update your filters.");
         return;
       }
       await SubscribersTable.upsertRows({
@@ -390,99 +353,67 @@ export const DiscordDMConversation = new Conversation({
       return;
     }
 
-    const parseList = (s: string) => s ? s.split(",").map((k) => k.trim()).filter(Boolean) : [];
+    const parseList = (s: string) => s ? s.split(",").map((k) => k.trim().toLowerCase()).filter(Boolean) : [];
 
-    const upsertSubscriber = async (patch: Partial<typeof subscriber>) => {
-      await SubscribersTable.upsertRows({
-        rows: [{ ...subscriber, ...patch }],
-        keyColumn: "dmChannelId",
-      });
+    const buildFilterCommand = () => {
+      const kws = subscriber.keywords || "";
+      const locs = subscriber.locations || "";
+      const exp = subscriber.experienceLevels || "";
+      return `/filter [${kws}] [${locs}] ${exp}`.trimEnd();
     };
 
-    // --- title keywords ---
-    if (text.startsWith("/addkw ")) {
-      const keyword = text.slice(7).trim().toLowerCase();
-      if (!keyword) { await send("⚠️ Format: `/addkw software`"); return; }
-      const current = parseList(subscriber.keywords);
-      if (current.includes(keyword)) { await send(`⚠️ **"${keyword}"** is already in your title filters.`); return; }
-      await upsertSubscriber({ keywords: [...current, keyword].join(",") });
-      await send(`✅ Title keyword **"${keyword}"** added.`);
-      return;
-    }
-
-    if (text.startsWith("/rmkw ")) {
-      const keyword = text.slice(6).trim().toLowerCase();
-      const current = parseList(subscriber.keywords);
-      if (!current.includes(keyword)) { await send(`⚠️ **"${keyword}"** not found. Use \`/keywords\` to see your filters.`); return; }
-      await upsertSubscriber({ keywords: current.filter((k) => k !== keyword).join(",") });
-      await send(`🗑️ Title keyword **"${keyword}"** removed.`);
-      return;
-    }
-
-    if (text === "/keywords") {
-      const current = parseList(subscriber.keywords);
-      await send(current.length === 0
-        ? "📋 No title keyword filters — matching all job titles."
-        : `📋 Title keywords (${current.length}):\n\n${current.map((k) => `• ${k}`).join("\n")}`);
-      return;
-    }
-
-    // --- location filters ---
-    if (text.startsWith("/addloc ")) {
-      const loc = text.slice(8).trim().toLowerCase();
-      if (!loc) { await send("⚠️ Format: `/addloc Toronto`"); return; }
-      const current = parseList(subscriber.locations);
-      if (current.includes(loc)) { await send(`⚠️ **"${loc}"** is already in your location filters.`); return; }
-      await upsertSubscriber({ locations: [...current, loc].join(",") });
-      await send(`✅ Location **"${loc}"** added.`);
-      return;
-    }
-
-    if (text.startsWith("/rmloc ")) {
-      const loc = text.slice(7).trim().toLowerCase();
-      const current = parseList(subscriber.locations);
-      if (!current.includes(loc)) { await send(`⚠️ **"${loc}"** not found. Use \`/locations\` to see your filters.`); return; }
-      await upsertSubscriber({ locations: current.filter((l) => l !== loc).join(",") });
-      await send(`🗑️ Location **"${loc}"** removed.`);
-      return;
-    }
-
-    if (text === "/locations") {
-      const current = parseList(subscriber.locations);
-      await send(current.length === 0
-        ? "📋 No location filters — matching all locations."
-        : `📋 Location filters (${current.length}):\n\n${current.map((l) => `• ${l}`).join("\n")}`);
-      return;
-    }
-
-    // --- experience level filters ---
-    if (text.startsWith("/addexp ")) {
-      const level = text.slice(8).trim().toLowerCase();
-      if (!VALID_EXP_LEVELS.includes(level as any)) {
-        await send(`⚠️ Invalid level. Choose from: ${VALID_EXP_LEVELS.join(", ")}`);
+    // --- /filter ---
+    if (text === "/filter" || text.startsWith("/filter ")) {
+      // No args — show current filters
+      if (text === "/filter") {
+        const kws = parseList(subscriber.keywords);
+        const locs = parseList(subscriber.locations);
+        const exps = parseList(subscriber.experienceLevels);
+        const lines = [
+          "**Your current filters:**",
+          `• Keywords: ${kws.length ? kws.join(", ") : "(none — all titles)"}`,
+          `• Locations: ${locs.length ? locs.join(", ") : "(none — all locations)"}`,
+          `• Experience: ${exps.length ? exps.join(", ") : "(none — all levels)"}`,
+          "",
+          "**Copy and modify:**",
+          `\`${buildFilterCommand()}\``,
+        ];
+        await send(lines.join("\n"));
         return;
       }
-      const current = parseList(subscriber.experienceLevels);
-      if (current.includes(level)) { await send(`⚠️ **"${level}"** is already in your experience filters.`); return; }
-      await upsertSubscriber({ experienceLevels: [...current, level].join(",") });
-      await send(`✅ Experience level **"${level}"** added.`);
-      return;
-    }
 
-    if (text.startsWith("/rmexp ")) {
-      const level = text.slice(7).trim().toLowerCase();
-      const current = parseList(subscriber.experienceLevels);
-      if (!current.includes(level)) { await send(`⚠️ **"${level}"** not found. Use \`/myexp\` to see your filters.`); return; }
-      await upsertSubscriber({ experienceLevels: current.filter((l) => l !== level).join(",") });
-      await send(`🗑️ Experience level **"${level}"** removed.`);
-      return;
-    }
+      // Parse: /filter [kw1,kw2] [loc1,loc2] exp1,exp2
+      const match = text.match(/^\/filter\s+\[([^\]]*)\]\s+\[([^\]]*)\]\s*(.*)$/);
+      if (!match) {
+        await send("⚠️ Format: `/filter [kw1,kw2] [city,country] intern,entry`\nType `/filter` to see your current filters.");
+        return;
+      }
 
-    if (text === "/myexp") {
-      const current = parseList(subscriber.experienceLevels);
-      await send(current.length === 0
-        ? "📋 No experience filters — matching all levels."
-        : `📋 Experience filters (${current.length}):\n\n${current.map((l) => `• ${l}`).join("\n")}`);
+      const keywords = parseList(match[1]!).join(",");
+      const locations = parseList(match[2]!).join(",");
+      const expRaw = parseList(match[3]!);
+      const invalidExp = expRaw.filter((e) => !VALID_EXP_LEVELS.has(e));
+      if (invalidExp.length > 0) {
+        await send(`⚠️ Invalid experience level(s): ${invalidExp.join(", ")}\nValid values: intern, entry, senior, staff`);
+        return;
+      }
+      const experienceLevels = expRaw.join(",");
+
+      await SubscribersTable.upsertRows({
+        rows: [{ ...subscriber, keywords, locations, experienceLevels }],
+        keyColumn: "dmChannelId",
+      });
+
+      const kws = parseList(keywords);
+      const locs = parseList(locations);
+      const exps = parseList(experienceLevels);
+      const lines = [
+        "✅ **Filters updated:**",
+        `• Keywords: ${kws.length ? kws.join(", ") : "(none — all titles)"}`,
+        `• Locations: ${locs.length ? locs.join(", ") : "(none — all locations)"}`,
+        `• Experience: ${exps.length ? exps.join(", ") : "(none — all levels)"}`,
+      ];
+      await send(lines.join("\n"));
       return;
     }
 
