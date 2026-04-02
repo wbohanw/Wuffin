@@ -319,15 +319,30 @@ export const DiscordThreadConversation = new Conversation({
   },
 });
 
+const VALID_EXP_LEVELS = ["intern", "entry", "senior", "staff"] as const;
+
 const DM_HELP = [
   "**Wuffin DM Commands**",
   "`/register` — subscribe to daily personal job digest",
-  "`/addkw <keyword>` — add a keyword filter for your digest",
-  "`/rmkw <keyword>` — remove a keyword filter",
-  "`/keywords` — list your active keyword filters",
+  "",
+  "**Title keywords** (partial match on job title)",
+  "`/addkw <keyword>` — e.g. `/addkw software`",
+  "`/rmkw <keyword>` — remove a title keyword",
+  "`/keywords` — list your title keywords",
+  "",
+  "**Location filters** (partial match: city, province, or country)",
+  "`/addloc <location>` — e.g. `/addloc Toronto`",
+  "`/rmloc <location>` — remove a location filter",
+  "`/locations` — list your location filters",
+  "",
+  "**Experience level filters** (intern / entry / senior / staff)",
+  "`/addexp <level>` — e.g. `/addexp intern`",
+  "`/rmexp <level>` — remove an experience filter",
+  "`/myexp` — list your experience filters",
+  "",
   "`/help` — show this message",
   "",
-  "If you have no keywords set, you'll receive all of today's jobs.",
+  "All filters are AND'd together. Empty filter = match all.",
 ].join("\n");
 
 export const DiscordDMConversation = new Conversation({
@@ -356,10 +371,10 @@ export const DiscordDMConversation = new Conversation({
         return;
       }
       await SubscribersTable.upsertRows({
-        rows: [{ dmChannelId, discordUserId, keywords: "", registeredAt: new Date().toISOString() }],
+        rows: [{ dmChannelId, discordUserId, keywords: "", locations: "", experienceLevels: "", registeredAt: new Date().toISOString() }],
         keyColumn: "dmChannelId",
       });
-      await send("✅ Registered! You'll receive a personal job digest every morning at 9 AM.\n\nUse `/addkw <keyword>` to filter by keywords, or leave it empty to get all jobs.");
+      await send("✅ Registered! You'll receive a personal job digest every morning at 9 AM.\n\nType `/help` to see available filter commands.");
       return;
     }
 
@@ -375,42 +390,99 @@ export const DiscordDMConversation = new Conversation({
       return;
     }
 
-    const parseKeywords = (s: string) => s ? s.split(",").map((k) => k.trim()).filter(Boolean) : [];
+    const parseList = (s: string) => s ? s.split(",").map((k) => k.trim()).filter(Boolean) : [];
 
+    const upsertSubscriber = async (patch: Partial<typeof subscriber>) => {
+      await SubscribersTable.upsertRows({
+        rows: [{ ...subscriber, ...patch }],
+        keyColumn: "dmChannelId",
+      });
+    };
+
+    // --- title keywords ---
     if (text.startsWith("/addkw ")) {
       const keyword = text.slice(7).trim().toLowerCase();
       if (!keyword) { await send("⚠️ Format: `/addkw software`"); return; }
-      const current = parseKeywords(subscriber.keywords);
-      if (current.includes(keyword)) { await send(`⚠️ Keyword **"${keyword}"** is already in your filters.`); return; }
-      const updated = [...current, keyword].join(",");
-      await SubscribersTable.upsertRows({
-        rows: [{ ...subscriber, keywords: updated }],
-        keyColumn: "dmChannelId",
-      });
-      await send(`✅ Keyword **"${keyword}"** added to your filters.`);
+      const current = parseList(subscriber.keywords);
+      if (current.includes(keyword)) { await send(`⚠️ **"${keyword}"** is already in your title filters.`); return; }
+      await upsertSubscriber({ keywords: [...current, keyword].join(",") });
+      await send(`✅ Title keyword **"${keyword}"** added.`);
       return;
     }
 
     if (text.startsWith("/rmkw ")) {
       const keyword = text.slice(6).trim().toLowerCase();
-      const current = parseKeywords(subscriber.keywords);
-      if (!current.includes(keyword)) { await send(`⚠️ Keyword **"${keyword}"** not found. Use \`/keywords\` to see your filters.`); return; }
-      const updated = current.filter((k) => k !== keyword).join(",");
-      await SubscribersTable.upsertRows({
-        rows: [{ ...subscriber, keywords: updated }],
-        keyColumn: "dmChannelId",
-      });
-      await send(`🗑️ Keyword **"${keyword}"** removed.`);
+      const current = parseList(subscriber.keywords);
+      if (!current.includes(keyword)) { await send(`⚠️ **"${keyword}"** not found. Use \`/keywords\` to see your filters.`); return; }
+      await upsertSubscriber({ keywords: current.filter((k) => k !== keyword).join(",") });
+      await send(`🗑️ Title keyword **"${keyword}"** removed.`);
       return;
     }
 
     if (text === "/keywords") {
-      const current = parseKeywords(subscriber.keywords);
-      if (current.length === 0) {
-        await send("📋 No keyword filters set — you'll receive all jobs in your daily digest.");
-      } else {
-        await send(`📋 Your keyword filters (${current.length}):\n\n${current.map((k) => `• ${k}`).join("\n")}`);
+      const current = parseList(subscriber.keywords);
+      await send(current.length === 0
+        ? "📋 No title keyword filters — matching all job titles."
+        : `📋 Title keywords (${current.length}):\n\n${current.map((k) => `• ${k}`).join("\n")}`);
+      return;
+    }
+
+    // --- location filters ---
+    if (text.startsWith("/addloc ")) {
+      const loc = text.slice(8).trim().toLowerCase();
+      if (!loc) { await send("⚠️ Format: `/addloc Toronto`"); return; }
+      const current = parseList(subscriber.locations);
+      if (current.includes(loc)) { await send(`⚠️ **"${loc}"** is already in your location filters.`); return; }
+      await upsertSubscriber({ locations: [...current, loc].join(",") });
+      await send(`✅ Location **"${loc}"** added.`);
+      return;
+    }
+
+    if (text.startsWith("/rmloc ")) {
+      const loc = text.slice(7).trim().toLowerCase();
+      const current = parseList(subscriber.locations);
+      if (!current.includes(loc)) { await send(`⚠️ **"${loc}"** not found. Use \`/locations\` to see your filters.`); return; }
+      await upsertSubscriber({ locations: current.filter((l) => l !== loc).join(",") });
+      await send(`🗑️ Location **"${loc}"** removed.`);
+      return;
+    }
+
+    if (text === "/locations") {
+      const current = parseList(subscriber.locations);
+      await send(current.length === 0
+        ? "📋 No location filters — matching all locations."
+        : `📋 Location filters (${current.length}):\n\n${current.map((l) => `• ${l}`).join("\n")}`);
+      return;
+    }
+
+    // --- experience level filters ---
+    if (text.startsWith("/addexp ")) {
+      const level = text.slice(8).trim().toLowerCase();
+      if (!VALID_EXP_LEVELS.includes(level as any)) {
+        await send(`⚠️ Invalid level. Choose from: ${VALID_EXP_LEVELS.join(", ")}`);
+        return;
       }
+      const current = parseList(subscriber.experienceLevels);
+      if (current.includes(level)) { await send(`⚠️ **"${level}"** is already in your experience filters.`); return; }
+      await upsertSubscriber({ experienceLevels: [...current, level].join(",") });
+      await send(`✅ Experience level **"${level}"** added.`);
+      return;
+    }
+
+    if (text.startsWith("/rmexp ")) {
+      const level = text.slice(7).trim().toLowerCase();
+      const current = parseList(subscriber.experienceLevels);
+      if (!current.includes(level)) { await send(`⚠️ **"${level}"** not found. Use \`/myexp\` to see your filters.`); return; }
+      await upsertSubscriber({ experienceLevels: current.filter((l) => l !== level).join(",") });
+      await send(`🗑️ Experience level **"${level}"** removed.`);
+      return;
+    }
+
+    if (text === "/myexp") {
+      const current = parseList(subscriber.experienceLevels);
+      await send(current.length === 0
+        ? "📋 No experience filters — matching all levels."
+        : `📋 Experience filters (${current.length}):\n\n${current.map((l) => `• ${l}`).join("\n")}`);
       return;
     }
 

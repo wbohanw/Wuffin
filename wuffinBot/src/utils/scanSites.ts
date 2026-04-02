@@ -27,36 +27,41 @@ const JobDetails = z.object({
   isJob: z.boolean().describe("Whether this page is actually a job posting"),
   title: z.string().optional().describe("The job title in English (translate if needed)"),
   summary: z.string().optional().describe("Brief 1-2 sentence summary of the role in English (translate if needed)"),
-  experienceRaw: z.string().optional().describe("Required experience as stated on the page (e.g. '5+ years', 'fresh grad', 'entry level')"),
-  location: z.string().optional().describe("Job location — city, country, or 'Remote'. Leave empty if not mentioned."),
+  experienceRaw: z.string().optional().describe("Required experience as stated on the page (e.g. '5+ years', 'fresh grad', 'entry level', 'intern', 'staff engineer')"),
+  location: z.string().optional().describe("Job location in 'City, State/Province, Country' format using full names (e.g. 'Toronto, Ontario, Canada' or 'Los Angeles, California, United States'). Use 'Remote' if fully remote. Leave empty if not mentioned."),
   jobType: z.string().optional().describe("Employment type: 'full-time', 'part-time', 'intern', or 'contract'. Leave empty if not mentioned."),
 });
 
 function mapExperience(raw?: string): ExperienceLevelType | undefined {
   if (!raw) return undefined;
   const s = raw.toLowerCase();
+  // Staff and above: staff engineer, principal, distinguished, director, VP, C-level, head of
   if (
-    s.includes("entry") || s.includes("junior") || s.includes("grad") ||
-    s.includes("0") || s.includes("fresh") || s.includes("intern") ||
-    /\bless than 1\b/.test(s) || /\b[<]?\s*1\s*year/.test(s)
+    s.includes("staff") || s.includes("principal") || s.includes("distinguished") ||
+    s.includes("director") || s.includes("vp ") || s.includes("vice president") ||
+    s.includes("head of") || s.includes("c-level") || s.includes("chief")
   ) {
-    // internships map to "entry" for experience but jobType handles intern separately
-    if (s.includes("intern") && !s.includes("entry") && !s.includes("junior") && !s.includes("senior")) {
-      return "entry";
-    }
-    return "entry";
+    return "staff";
   }
-  if (
-    s.includes("1") || s.includes("2") || s.includes("3") ||
-    /1[-–]3\s*year/.test(s) || /[12]\+?\s*year/.test(s)
-  ) {
-    return "junior";
+  // Intern: explicit internship/co-op
+  if (s.includes("intern") || s.includes("co-op") || s.includes("coop")) {
+    return "intern";
   }
+  // Senior: senior title or 3+ years experience
   if (
-    s.includes("senior") || s.includes("lead") || s.includes("principal") ||
-    /3\+/.test(s) || /[4-9]\d*\s*\+?\s*year/.test(s)
+    s.includes("senior") || s.includes("lead") ||
+    /[3-9]\d*\s*\+?\s*year/.test(s) || /3\+/.test(s)
   ) {
     return "senior";
+  }
+  // Entry: entry level, junior, graduate, fresh grad, 0-3 years
+  if (
+    s.includes("entry") || s.includes("junior") || s.includes("grad") ||
+    s.includes("fresh") || s.includes("associate") || s.includes("new grad") ||
+    /[0-3]\s*\+?\s*year/.test(s) || /\bless than [123]\b/.test(s) ||
+    /\b[<]?\s*[123]\s*year/.test(s)
+  ) {
+    return "entry";
   }
   return undefined;
 }
@@ -86,7 +91,7 @@ export async function parseJobPage(url: string): Promise<{
 
     const details = await adk.zai.extract(markdown, JobDetails, {
       instructions:
-        "Determine if this page is a job posting. If yes, extract the title, a brief summary, the raw experience requirement, the location, and the employment type. If this is not a job posting (e.g. login page, homepage, list page), set isJob to false. IMPORTANT: Always write the title and summary in English, translating from any other language if necessary.",
+        "Determine if this page is a job posting. If yes, extract: (1) title and summary in English (translate if needed), (2) raw experience requirement as stated (e.g. '5+ years', 'intern', 'staff engineer', 'fresh grad'), (3) location formatted as 'City, State/Province, Country' using full names (e.g. 'Toronto, Ontario, Canada') — use 'Remote' if fully remote, leave empty if unknown, (4) employment type. If this is not a job posting (login page, homepage, job list page), set isJob to false.",
     });
 
     return {

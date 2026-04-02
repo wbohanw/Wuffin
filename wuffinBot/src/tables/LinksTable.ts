@@ -1,7 +1,7 @@
 import { Table, z } from "@botpress/runtime";
 
-export const ExperienceLevel = z.enum(["entry", "junior", "senior"]).describe(
-  "entry = <1 yr, junior = 1-3 yrs, senior = 3+ yrs"
+export const ExperienceLevel = z.enum(["intern", "entry", "senior", "staff"]).describe(
+  "intern = internship, entry = 0-3 yrs (incl. junior), senior = 3-8 yrs, staff = staff/principal/director/VP and above"
 );
 export type ExperienceLevel = z.infer<typeof ExperienceLevel>;
 

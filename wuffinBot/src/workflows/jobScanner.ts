@@ -58,6 +58,8 @@ export const DailyJobDigestWorkflow = new Workflow({
           PostPersonalInsightWorkflow.start({
             dmChannelId: s.dmChannelId,
             keywords: s.keywords ?? "",
+            locations: s.locations ?? "",
+            experienceLevels: s.experienceLevels ?? "",
           })
         )
       );
